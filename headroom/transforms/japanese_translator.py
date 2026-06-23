@@ -18,7 +18,7 @@ _JA_EN_MODEL_ID = "Helsinki-NLP/opus-mt-ja-en"
 # CJK 検出 regex（estimator.py の CJK_PATTERN に準拠）
 _CJK_PATTERN = re.compile(
     "[　-〿぀-ヿ㐀-䶿一-鿿"
-    "가-힯豈-﫿＀-￯"
+    "가-힯豈-﫿＀-￯"
     "\U00020000-\U0002a6df]"
 )
 
@@ -73,7 +73,13 @@ def _translate(text: str) -> str:
         return text
     try:
         inputs = tok([text], return_tensors="pt", padding=True,
-                     truncation=True, max_length=512)
+                     truncation=False)
+        if inputs["input_ids"].shape[1] > 512:
+            logger.debug(
+                "JapaneseTranslator: input too long (%d tokens), skipping translation",
+                inputs["input_ids"].shape[1],
+            )
+            return text
         outputs = mdl.generate(**inputs)
         result = tok.decode(outputs[0], skip_special_tokens=True)
         return result if result.strip() else text
@@ -121,7 +127,7 @@ class JapaneseTranslationTransform(Transform):
 
         for msg in mutable:
             role = msg.get("role", "")
-            if role in {"system", "developer", "assistant"}:
+            if role in {"system", "developer", "assistant", "tool"}:
                 continue
 
             content = msg.get("content", "")
