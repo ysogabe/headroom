@@ -339,6 +339,7 @@ def _start_proxy(
     memory: bool = False,
     agent_type: str = "unknown",
     code_graph: bool = False,
+    japanese_translation: bool = False,
     backend: str | None = None,
     anyllm_provider: str | None = None,
     region: str | None = None,
@@ -370,6 +371,10 @@ def _start_proxy(
     # Forward --code-graph flag to proxy subprocess (live file watcher)
     if code_graph:
         cmd.append("--code-graph")
+
+    # Forward --enable-japanese-translation flag to proxy subprocess
+    if japanese_translation:
+        cmd.append("--enable-japanese-translation")
 
     # Forward backend configuration to proxy subprocess
     _backend = backend or os.environ.get("HEADROOM_BACKEND")
@@ -2333,6 +2338,7 @@ def _ensure_proxy(
     memory: bool = False,
     agent_type: str = "unknown",
     code_graph: bool = False,
+    japanese_translation: bool = False,
     backend: str | None = None,
     anyllm_provider: str | None = None,
     region: str | None = None,
@@ -2524,6 +2530,7 @@ def _ensure_proxy(
                     memory=memory,
                     agent_type=agent_type,
                     code_graph=code_graph,
+                    japanese_translation=japanese_translation,
                     backend=backend,
                     anyllm_provider=anyllm_provider,
                     region=region,
@@ -3035,6 +3042,13 @@ def unwrap() -> None:
 )
 @click.option("--memory", is_flag=True, help="Enable persistent cross-session memory")
 @click.option(
+    "--enable-japanese-translation",
+    "japanese_translation",
+    is_flag=True,
+    default=False,
+    help="Enable Japanese→English preprocessing. Requires headroom-ai[translate].",
+)
+@click.option(
     "--tool-search",
     "tool_search",
     default=None,
@@ -3071,6 +3085,7 @@ def claude(
     no_proxy: bool,
     learn: bool,
     memory: bool,
+    japanese_translation: bool,
     tool_search: str | None,
     backend: str | None,
     region: str | None,
@@ -3201,6 +3216,7 @@ def claude(
             memory=memory,
             agent_type="claude",
             code_graph=code_graph,
+            japanese_translation=japanese_translation,
             backend=backend,
             region=region,
             anthropic_api_url=foundry_upstream,

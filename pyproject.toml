@@ -107,6 +107,14 @@ ml = [
     # strands-agents`) drags huggingface-hub backwards.
     "huggingface-hub>=1.5.0,<2.0",
 ]
+# Japanese translation (Helsinki-NLP MarianMT models)
+translate = [
+    "torch>=2.0.0",
+    "transformers>=4.30.0,<6.0",
+    "huggingface-hub>=1.5.0,<2.0",
+    "sentencepiece>=0.1.99",
+    "sacremoses>=0.1.0",
+]
 # Memory system (hierarchical memory with vector search)
 memory = [
     "hnswlib>=0.8.0",
@@ -427,4 +435,9 @@ exclude_lines = [
     "raise NotImplementedError",
     "if TYPE_CHECKING:",
     "if __name__ == .__main__.:",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
 ]
