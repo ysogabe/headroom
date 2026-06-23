@@ -130,7 +130,7 @@ _AGENT_SAVINGS_TARGET_AGENTS = {"claude", "codex", "cursor", "opencode"}
 _WRAP_PROXY_TIMEOUT_ENV = "HEADROOM_WRAP_PROXY_TIMEOUT"
 _WRAP_PROXY_TIMEOUT_DEFAULT_SECONDS = 45
 _WRAP_PROXY_TIMEOUT_ML_DEFAULT_SECONDS = 90
-_WRAP_PROXY_TIMEOUT_ML_MODULES = ("torch", "sentence_transformers", "spacy")
+_WRAP_PROXY_TIMEOUT_ML_MODULES = ("torch", "transformers", "sentence_transformers", "spacy")
 
 # Issue #746: Claude Code disables on-demand tool loading (deferral) when
 # ANTHROPIC_BASE_URL is a custom host and ENABLE_TOOL_SEARCH is unset, which
@@ -285,13 +285,21 @@ def _print_telemetry_notice() -> None:
 
 
 def _check_proxy(port: int) -> bool:
-    """Check if Headroom proxy is running on given port."""
+    """Check if Headroom proxy is ready to serve HTTP requests.
+
+    Uses /livez (HTTP GET) rather than a raw TCP connect so we don't
+    declare the proxy ready until FastAPI has finished initialising —
+    torch/transformers imports can hold up the first request handler
+    for several seconds after uvicorn binds the port.
+    """
+    import urllib.request
+    import urllib.error
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            s.connect(("127.0.0.1", port))
-            return True
-    except (TimeoutError, ConnectionRefusedError, OSError):
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/livez", timeout=2
+        ) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, Exception):
         return False
 
 
