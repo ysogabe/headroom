@@ -2071,7 +2071,31 @@ def _proxy_version(payload: dict[str, Any] | None) -> str | None:
 
 
 def _proxy_needs_version_restart(payload: dict[str, Any] | None) -> bool:
-    """Return True when a running Headroom proxy uses a different package version."""
+    """Return True when a running Headroom proxy uses a different package version.
+
+    Returns False in two cases where version comparison is unreliable:
+
+    1. Running from a git source tree: ``_source_tree_version()`` recomputes
+       the version string on every new commit, so a ``fix:`` commit made while
+       a proxy is already running would always trigger a kill/restart cycle even
+       though the code the proxy is executing has not changed.  Installed wheel
+       builds are unaffected because their version is fixed at build time.
+
+    2. ``HEADROOM_SKIP_VERSION_RESTART=1``: explicit developer escape hatch for
+       edge cases where the auto-detection is insufficient.
+    """
+    # Escape hatch: explicit env override.
+    if os.environ.get("HEADROOM_SKIP_VERSION_RESTART", "").lower() in (
+        "1", "true", "yes", "on"
+    ):
+        return False
+
+    # Source-tree installs: version string changes on every commit, so
+    # version-based restarts would kill a healthy proxy on each new commit.
+    from headroom._version import _source_root as _version_source_root
+    if _version_source_root() is not None:
+        return False
+
     running_version = _proxy_version(payload)
     return (
         running_version is not None
