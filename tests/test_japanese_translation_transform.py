@@ -8,6 +8,7 @@ Covers:
 
 from __future__ import annotations
 
+from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -125,7 +126,10 @@ class TestApply:
     ):
         transform = _make_transform()
         tokenizer = _make_tokenizer(token_count)
-        with patch.object(jt, "_translate", return_value=translate_return) as mock_tr:
+        # _translate_batch は texts: list[str] -> list[str] を返す
+        def _batch_fn(texts):
+            return [translate_return for _ in texts]
+        with patch.object(jt, "_translate_batch", side_effect=_batch_fn) as mock_tr:
             result = transform.apply(
                 messages, tokenizer, frozen_message_count=frozen_message_count
             )
@@ -152,7 +156,7 @@ class TestApply:
         result, mock_tr = self._apply_with_mock_translate(
             messages, translate_return="Japanese message"
         )
-        mock_tr.assert_called_once_with("日本語のメッセージ")
+        mock_tr.assert_called_once_with(["日本語のメッセージ"])
         assert result.messages[0]["content"] == "Japanese message"
         assert "japanese_translation:user" in result.transforms_applied
 
@@ -194,7 +198,7 @@ class TestApply:
         result, mock_tr = self._apply_with_mock_translate(
             messages, translate_return="block translated"
         )
-        mock_tr.assert_called_once_with("日本語のブロック")
+        mock_tr.assert_called_once_with(["日本語のブロック"])
         assert result.messages[0]["content"][0]["text"] == "block translated"
         assert "japanese_translation:user:block" in result.transforms_applied
 
@@ -208,7 +212,7 @@ class TestApply:
         result, mock_tr = self._apply_with_mock_translate(
             messages, translate_return="content key translated"
         )
-        mock_tr.assert_called_once_with("日本語のコンテント")
+        mock_tr.assert_called_once_with(["日本語のコンテント"])
         assert result.messages[0]["content"][0]["content"] == "content key translated"
         assert "japanese_translation:user:block" in result.transforms_applied
 
@@ -259,3 +263,94 @@ class TestApply:
         assert result.messages[1]["content"] == "en"
         assert result.messages[2]["content"] == "日本語のアシスタント"
         assert result.transforms_applied == ["japanese_translation:user"]
+
+
+# ---------------------------------------------------------------------------
+# Timeout / batch behavior
+# ---------------------------------------------------------------------------
+
+class TestTranslateTimeout:
+    """Tests for timeout and batch behavior."""
+
+    def test_translate_timeout_returns_original(self):
+        """future.result がタイムアウトすると原文リストをそのまま返す。"""
+        import headroom.transforms.japanese_translator as jt_mod
+        mock_pipe = MagicMock()
+
+        with patch.object(jt_mod, "_pipe", mock_pipe):
+            mock_future = MagicMock()
+            mock_future.result.side_effect = _FuturesTimeoutError()
+            with patch.object(jt_mod._translation_executor, "submit", return_value=mock_future):
+                result = jt_mod._translate_batch(["日本語テスト"])
+
+        assert result == ["日本語テスト"]
+
+    def test_translate_timeout_increments_leaked_counter(self):
+        """タイムアウト時に _translation_leaked_threads が +1 される。"""
+        import headroom.transforms.japanese_translator as jt_mod
+
+        before = jt_mod._translation_leaked_threads
+        mock_pipe = MagicMock()
+
+        with patch.object(jt_mod, "_pipe", mock_pipe):
+            mock_future = MagicMock()
+            mock_future.result.side_effect = _FuturesTimeoutError()
+            with patch.object(jt_mod._translation_executor, "submit", return_value=mock_future):
+                jt_mod._translate_batch(["日本語テスト"])
+
+        assert jt_mod._translation_leaked_threads == before + 1
+
+    def test_apply_uses_batch_translation(self):
+        """apply() が複数 CJK メッセージを _translate_batch で 1 回だけ処理する。"""
+        from headroom.transforms.japanese_translator import JapaneseTranslationTransform
+        import headroom.transforms.japanese_translator as jt_mod
+
+        transform = JapaneseTranslationTransform.__new__(JapaneseTranslationTransform)
+        tok = MagicMock()
+        tok.count_messages = MagicMock(return_value=10)
+
+        messages = [
+            {"role": "user", "content": "日本語その一"},
+            {"role": "user", "content": "日本語その二"},
+        ]
+
+        def _batch_fn(texts):
+            return ["translated" for _ in texts]
+
+        with patch.object(jt_mod, "_translate_batch", side_effect=_batch_fn) as mock_tr:
+            result = transform.apply(messages, tok)
+
+        # _translate_batch は 1 回だけ呼ばれる
+        mock_tr.assert_called_once()
+        # 呼ばれた引数はテキストリスト（両方含む）
+        call_args = mock_tr.call_args[0][0]
+        assert "日本語その一" in call_args
+        assert "日本語その二" in call_args
+
+    def test_apply_single_message_calls_batch_once(self):
+        """1 件の CJK メッセージでも _translate_batch 経由（1 回呼ばれる）。"""
+        from headroom.transforms.japanese_translator import JapaneseTranslationTransform
+        import headroom.transforms.japanese_translator as jt_mod
+
+        transform = JapaneseTranslationTransform.__new__(JapaneseTranslationTransform)
+        tok = MagicMock()
+        tok.count_messages = MagicMock(return_value=10)
+
+        messages = [{"role": "user", "content": "日本語"}]
+
+        def _batch_fn(texts):
+            return ["Japanese" for _ in texts]
+
+        with patch.object(jt_mod, "_translate_batch", side_effect=_batch_fn) as mock_tr:
+            result = transform.apply(messages, tok)
+
+        mock_tr.assert_called_once()
+
+    def test_get_translation_stats_structure(self):
+        """get_translation_stats() が正しいキーを返す。"""
+        from headroom.transforms.japanese_translator import get_translation_stats
+        stats = get_translation_stats()
+        assert "timeout_seconds" in stats
+        assert "leaked_threads_total" in stats
+        assert isinstance(stats["timeout_seconds"], float)
+        assert isinstance(stats["leaked_threads_total"], int)

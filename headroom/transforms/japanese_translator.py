@@ -1,9 +1,15 @@
-"""Japanese → English translation preprocessing transform."""
+"""Japanese → English translation preprocessing transform.
+
+Uses Qwen/Qwen2.5-1.5B-Instruct via HuggingFace pipeline.
+On Apple Silicon (M3+) the model runs on MPS; falls back to CPU elsewhere.
+"""
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FuturesTimeoutError
 from typing import Any
 
 from ..config import TransformResult
@@ -13,21 +19,38 @@ from .base import Transform, split_frozen
 
 logger = logging.getLogger(__name__)
 
-_JA_EN_MODEL_ID = "Helsinki-NLP/opus-mt-ja-en"
+_MODEL_ID = "Qwen/Qwen2.5-1.5B-Instruct"
+
+_SYSTEM_PROMPT = (
+    "You are a Japanese-to-English translator. "
+    "Translate the Japanese text provided by the user into natural English. "
+    "Output only the translation, with no explanations or extra text."
+)
 
 # CJK 検出 regex（estimator.py の CJK_PATTERN に準拠）
 _CJK_PATTERN = re.compile(
     "[　-〿぀-ヿ㐀-䶿一-鿿"
-    "가-힯豈-﫿＀-￯"
+    "가-힯豈-﫿＀-￯"
     "\U00020000-\U0002a6df]"
 )
 
 # モジュールレベルのシングルトン（モデルは1回だけロード）
 _model_lock = threading.Lock()
-_model = None
-_tokenizer = None
+_pipe = None  # transformers pipeline instance
 _load_thread: threading.Thread | None = None
 _load_failed = False
+
+# デフォルト 30 秒（LLM 推論は MarianMT より時間がかかるため余裕を持たせる）
+TRANSLATION_TIMEOUT_SECONDS: float = float(
+    os.environ.get("HEADROOM_TRANSLATION_TIMEOUT_SECONDS", "30")
+)
+
+# max_workers=1: 逐次推論でメモリ圧力を抑える
+_translation_executor = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="ja-translate"
+)
+_translation_leaked_threads: int = 0
+_translation_leaked_lock = threading.Lock()
 
 
 def _has_cjk(text: str) -> bool:
@@ -35,16 +58,29 @@ def _has_cjk(text: str) -> bool:
 
 
 def _background_load() -> None:
-    global _model, _tokenizer, _load_failed
+    global _pipe, _load_failed
     try:
-        logger.info("JapaneseTranslator: loading %s ...", _JA_EN_MODEL_ID)
-        from transformers import MarianMTModel, MarianTokenizer
-        tok = MarianTokenizer.from_pretrained(_JA_EN_MODEL_ID)
-        mdl = MarianMTModel.from_pretrained(_JA_EN_MODEL_ID)
+        import torch
+        from transformers import pipeline as hf_pipeline
+
+        logger.info("JapaneseTranslator: loading %s ...", _MODEL_ID)
+
+        if torch.backends.mps.is_available():
+            device = "mps"
+            dtype = torch.bfloat16   # Apple Silicon ネイティブ対応
+        else:
+            device = "cpu"
+            dtype = torch.float32
+
+        pipe = hf_pipeline(
+            "text-generation",
+            model=_MODEL_ID,
+            torch_dtype=dtype,
+            device=device,
+        )
         with _model_lock:
-            _tokenizer = tok
-            _model = mdl
-        logger.info("JapaneseTranslator: model loaded")
+            _pipe = pipe
+        logger.info("JapaneseTranslator: model loaded (device=%s)", device)
     except Exception as exc:
         logger.warning("JapaneseTranslator: load failed: %s", exc)
         with _model_lock:
@@ -55,7 +91,7 @@ def ensure_background_load() -> None:
     """バックグラウンドでモデルをロード開始（冪等、非ブロッキング）。"""
     global _load_thread
     with _model_lock:
-        if _model is not None or _load_failed:
+        if _pipe is not None or _load_failed:
             return
         if _load_thread is not None and _load_thread.is_alive():
             return
@@ -65,34 +101,63 @@ def ensure_background_load() -> None:
     t.start()
 
 
-def _translate(text: str) -> str:
-    """テキストを英語に翻訳。失敗時は原文をそのまま返す。"""
+def _translate_batch(texts: list[str]) -> list[str]:
+    """複数テキストを逐次 LLM 推論で日→英翻訳する。
+
+    タイムアウトまたは失敗時は原文リストをそのまま返す（fail-open）。
+    MarianMT と異なり 512 トークン制限はなく、長文も処理できる。
+    """
     with _model_lock:
-        mdl, tok = _model, _tokenizer
-    if mdl is None or tok is None:
-        return text
+        pipe = _pipe
+    if pipe is None:
+        return texts
+
+    def _infer_all() -> list[str]:
+        results = []
+        for text in texts:
+            messages = [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user",   "content": text},
+            ]
+            out = pipe(messages, max_new_tokens=512, do_sample=False)
+            # pipeline の戻り値: [{"generated_text": [{role, content}, ...]}]
+            translated = out[0]["generated_text"][-1]["content"].strip()
+            results.append(translated if translated else text)
+        return results
+
+    future = _translation_executor.submit(_infer_all)
     try:
-        inputs = tok([text], return_tensors="pt", padding=True,
-                     truncation=False)
-        if inputs["input_ids"].shape[1] > 512:
-            logger.debug(
-                "JapaneseTranslator: input too long (%d tokens), skipping translation",
-                inputs["input_ids"].shape[1],
-            )
-            return text
-        outputs = mdl.generate(**inputs)
-        result = tok.decode(outputs[0], skip_special_tokens=True)
-        return result if result.strip() else text
+        results = future.result(timeout=TRANSLATION_TIMEOUT_SECONDS)
+        return [r if r.strip() else t for r, t in zip(results, texts)]
+    except _FuturesTimeoutError:
+        global _translation_leaked_threads
+        with _translation_leaked_lock:
+            _translation_leaked_threads += 1
+        logger.warning(
+            "JapaneseTranslator: batch inference timed out after %.1fs",
+            TRANSLATION_TIMEOUT_SECONDS,
+        )
+        return texts
     except Exception as exc:
-        logger.debug("JapaneseTranslator: translation error: %s", exc)
-        return text
+        logger.debug("JapaneseTranslator: batch translation error: %s", exc)
+        return texts
+
+
+def get_translation_stats() -> dict:
+    """翻訳エグゼキュータの統計を返す（/stats エンドポイント向け）。"""
+    with _translation_leaked_lock:
+        leaked = _translation_leaked_threads
+    return {
+        "timeout_seconds": TRANSLATION_TIMEOUT_SECONDS,
+        "leaked_threads_total": leaked,
+    }
 
 
 class JapaneseTranslationTransform(Transform):
     """CJK テキストを英語に翻訳してから KompressCompressor に渡す。
 
-    翻訳対象: user / tool ロールのメッセージ（非フリーズ部分のみ）
-    翻訳しない: system/developer（キャッシュ対象）、assistant（LLM 出力）
+    翻訳対象: user ロールのメッセージ（非フリーズ部分のみ）
+    翻訳しない: system/developer（キャッシュ対象）、assistant/tool（LLM 出力）
     """
 
     name = "japanese_translation"
@@ -125,7 +190,11 @@ class JapaneseTranslationTransform(Transform):
 
         _, mutable = split_frozen(result, frozen_count)
 
-        for msg in mutable:
+        # 第 1 パス: 翻訳対象テキストと書き戻し先を収集
+        locations: list[tuple[int, int | None, str | None, str]] = []
+        texts: list[str] = []
+
+        for msg_idx, msg in enumerate(mutable):
             role = msg.get("role", "")
             if role in {"system", "developer", "assistant", "tool"}:
                 continue
@@ -133,22 +202,33 @@ class JapaneseTranslationTransform(Transform):
             content = msg.get("content", "")
             if isinstance(content, str):
                 if _has_cjk(content):
-                    t = _translate(content)
-                    if t != content:
-                        msg["content"] = t
-                        applied.append(f"japanese_translation:{role}")
+                    locations.append((msg_idx, None, None, role))
+                    texts.append(content)
             elif isinstance(content, list):
-                for block in content:
+                for blk_idx, block in enumerate(content):
                     if not isinstance(block, dict):
                         continue
                     for key in ("text", "content"):
                         text = block.get(key, "")
                         if isinstance(text, str) and _has_cjk(text):
-                            t = _translate(text)
-                            if t != text:
-                                block[key] = t
-                                applied.append(f"japanese_translation:{role}:block")
+                            locations.append((msg_idx, blk_idx, key, role))
+                            texts.append(text)
                             break
+
+        # バッチ翻訳（CJK テキストがある場合のみ）
+        if texts:
+            translated = _translate_batch(texts)
+
+            # 第 2 パス: 翻訳結果を書き戻す
+            for (msg_idx, blk_idx, key, role), orig, trans in zip(locations, texts, translated):
+                if trans == orig:
+                    continue
+                if blk_idx is None:
+                    mutable[msg_idx]["content"] = trans
+                    applied.append(f"japanese_translation:{role}")
+                else:
+                    mutable[msg_idx]["content"][blk_idx][key] = trans
+                    applied.append(f"japanese_translation:{role}:block")
 
         tokens_after = tokenizer.count_messages(result)
         return TransformResult(
