@@ -61,7 +61,11 @@ def _background_load() -> None:
     global _pipe, _load_failed
     try:
         import torch
-        from transformers import pipeline as hf_pipeline
+        # transformers 5.x uses _LazyModule for top-level exports, which is not
+        # always thread-safe when accessed from a background thread while the
+        # main thread is still initialising the package.  Importing directly
+        # from the concrete sub-package bypasses the lazy-loading machinery.
+        from transformers.pipelines import pipeline as hf_pipeline
 
         logger.info("JapaneseTranslator: loading %s ...", _MODEL_ID)
 
