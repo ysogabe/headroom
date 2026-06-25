@@ -332,7 +332,7 @@ class TokenizerRegistry:
         Anthropic uses a custom tokenizer that's not publicly available.
         We use estimation calibrated for Claude models.
         """
-        # Claude models use ~3.5 chars per token on average
+        # Claude models use ~3.5 chars per token on average (conservative estimate)
         return EstimatingTokenCounter(chars_per_token=3.5)
 
     def _create_google(self, model: str) -> TokenCounter:

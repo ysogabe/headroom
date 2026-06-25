@@ -130,7 +130,7 @@ _AGENT_SAVINGS_TARGET_AGENTS = {"claude", "codex", "cursor", "opencode"}
 _WRAP_PROXY_TIMEOUT_ENV = "HEADROOM_WRAP_PROXY_TIMEOUT"
 _WRAP_PROXY_TIMEOUT_DEFAULT_SECONDS = 45
 _WRAP_PROXY_TIMEOUT_ML_DEFAULT_SECONDS = 90
-_WRAP_PROXY_TIMEOUT_ML_MODULES = ("torch", "sentence_transformers", "spacy")
+_WRAP_PROXY_TIMEOUT_ML_MODULES = ("torch", "transformers", "sentence_transformers", "spacy")
 
 # Issue #746: Claude Code disables on-demand tool loading (deferral) when
 # ANTHROPIC_BASE_URL is a custom host and ENABLE_TOOL_SEARCH is unset, which
@@ -285,13 +285,21 @@ def _print_telemetry_notice() -> None:
 
 
 def _check_proxy(port: int) -> bool:
-    """Check if Headroom proxy is running on given port."""
+    """Check if Headroom proxy is ready to serve HTTP requests.
+
+    Uses /livez (HTTP GET) rather than a raw TCP connect so we don't
+    declare the proxy ready until FastAPI has finished initialising —
+    torch/transformers imports can hold up the first request handler
+    for several seconds after uvicorn binds the port.
+    """
+    import urllib.request
+    import urllib.error
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(1)
-            s.connect(("127.0.0.1", port))
-            return True
-    except (TimeoutError, ConnectionRefusedError, OSError):
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/livez", timeout=2
+        ) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, Exception):
         return False
 
 
@@ -339,6 +347,7 @@ def _start_proxy(
     memory: bool = False,
     agent_type: str = "unknown",
     code_graph: bool = False,
+    japanese_translation: bool = False,
     backend: str | None = None,
     anyllm_provider: str | None = None,
     region: str | None = None,
@@ -370,6 +379,10 @@ def _start_proxy(
     # Forward --code-graph flag to proxy subprocess (live file watcher)
     if code_graph:
         cmd.append("--code-graph")
+
+    # Forward --enable-japanese-translation flag to proxy subprocess
+    if japanese_translation:
+        cmd.append("--enable-japanese-translation")
 
     # Forward backend configuration to proxy subprocess
     _backend = backend or os.environ.get("HEADROOM_BACKEND")
@@ -2089,7 +2102,31 @@ def _proxy_version(payload: dict[str, Any] | None) -> str | None:
 
 
 def _proxy_needs_version_restart(payload: dict[str, Any] | None) -> bool:
-    """Return True when a running Headroom proxy uses a different package version."""
+    """Return True when a running Headroom proxy uses a different package version.
+
+    Returns False in two cases where version comparison is unreliable:
+
+    1. Running from a git source tree: ``_source_tree_version()`` recomputes
+       the version string on every new commit, so a ``fix:`` commit made while
+       a proxy is already running would always trigger a kill/restart cycle even
+       though the code the proxy is executing has not changed.  Installed wheel
+       builds are unaffected because their version is fixed at build time.
+
+    2. ``HEADROOM_SKIP_VERSION_RESTART=1``: explicit developer escape hatch for
+       edge cases where the auto-detection is insufficient.
+    """
+    # Escape hatch: explicit env override.
+    if os.environ.get("HEADROOM_SKIP_VERSION_RESTART", "").lower() in (
+        "1", "true", "yes", "on"
+    ):
+        return False
+
+    # Source-tree installs: version string changes on every commit, so
+    # version-based restarts would kill a healthy proxy on each new commit.
+    from headroom._version import _source_root as _version_source_root
+    if _version_source_root() is not None:
+        return False
+
     running_version = _proxy_version(payload)
     return (
         running_version is not None
@@ -2364,6 +2401,7 @@ def _ensure_proxy(
     memory: bool = False,
     agent_type: str = "unknown",
     code_graph: bool = False,
+    japanese_translation: bool = False,
     backend: str | None = None,
     anyllm_provider: str | None = None,
     region: str | None = None,
@@ -2555,6 +2593,7 @@ def _ensure_proxy(
                     memory=memory,
                     agent_type=agent_type,
                     code_graph=code_graph,
+                    japanese_translation=japanese_translation,
                     backend=backend,
                     anyllm_provider=anyllm_provider,
                     region=region,
@@ -3066,6 +3105,13 @@ def unwrap() -> None:
 )
 @click.option("--memory", is_flag=True, help="Enable persistent cross-session memory")
 @click.option(
+    "--enable-japanese-translation",
+    "japanese_translation",
+    is_flag=True,
+    default=False,
+    help="Enable Japanese→English preprocessing. Requires headroom-ai[translate].",
+)
+@click.option(
     "--tool-search",
     "tool_search",
     default=None,
@@ -3102,6 +3148,7 @@ def claude(
     no_proxy: bool,
     learn: bool,
     memory: bool,
+    japanese_translation: bool,
     tool_search: str | None,
     backend: str | None,
     region: str | None,
@@ -3232,6 +3279,7 @@ def claude(
             memory=memory,
             agent_type="claude",
             code_graph=code_graph,
+            japanese_translation=japanese_translation,
             backend=backend,
             region=region,
             anthropic_api_url=foundry_upstream,

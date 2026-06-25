@@ -637,6 +637,16 @@ def dashboard(port: int, no_open: bool) -> None:
         "cost of slower learning. Default: 5. (env: HEADROOM_MIN_EVIDENCE)"
     ),
 )
+@click.option(
+    "--enable-japanese-translation",
+    "japanese_translation",
+    is_flag=True,
+    default=False,
+    envvar="HEADROOM_JAPANESE_TRANSLATION",
+    help="Enable Japanese→English preprocessing before ML compression. "
+    "Requires pip install headroom-ai[translate]. "
+    "Trade-off: LLM receives user messages in English.",
+)
 # Backend configuration
 @click.option(
     "--backend",
@@ -799,6 +809,7 @@ def proxy(
     learn: bool,
     no_learn: bool,
     min_evidence: int | None,
+    japanese_translation: bool,
     backend: str,
     anyllm_provider: str,
     anthropic_api_url: str | None,
@@ -1037,6 +1048,7 @@ def proxy(
         traffic_learning_enabled=False if is_stateless else (learn and not no_learn),
         traffic_learning_agent_type=os.environ.get("HEADROOM_AGENT_TYPE", "unknown"),
         traffic_learning_min_evidence=min_evidence if min_evidence is not None else 5,
+        japanese_translation_enabled=japanese_translation,
         # Backend (Anthropic direct, Bedrock, LiteLLM, or any-llm)
         backend=backend,
         bedrock_region=bedrock_region or region,

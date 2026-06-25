@@ -682,12 +682,19 @@ class HeadroomProxy(
         )
         self._code_aware_status = "lazy" if config.code_aware_enabled else "disabled"
 
+        _jp_transforms: list = []
+        if config.japanese_translation_enabled:
+            from headroom.transforms.japanese_translator import JapaneseTranslationTransform
+
+            _jp = JapaneseTranslationTransform()
+            _jp_transforms = [_jp]
+
         self.anthropic_pipeline = TransformPipeline(
-            transforms=[cache_aligner, anthropic_router],
+            transforms=[*_jp_transforms, cache_aligner, anthropic_router],
             provider=self.anthropic_provider,
         )
         self.openai_pipeline = TransformPipeline(
-            transforms=[cache_aligner, openai_router],
+            transforms=[*_jp_transforms, cache_aligner, openai_router],
             provider=self.openai_provider,
         )
 
@@ -3791,6 +3798,7 @@ def _proxy_config_from_env() -> ProxyConfig:
         read_maturation_min_size_bytes=_get_env_int(
             "HEADROOM_READ_MATURATION_MIN_SIZE_BYTES", 2048
         ),
+        japanese_translation_enabled=_get_env_bool("HEADROOM_JAPANESE_TRANSLATION", False),
     )
 
 

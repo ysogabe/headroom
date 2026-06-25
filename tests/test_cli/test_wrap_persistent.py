@@ -134,6 +134,9 @@ def test_ensure_proxy_restarts_idle_stale_persistent_deployment(monkeypatch) -> 
         "config": {"pid": 12345},
     }
 
+    # Simulate an installed wheel build (not a source-tree checkout) so that
+    # version-based restart logic is active.
+    monkeypatch.setattr("headroom._version._source_root", lambda: None)
     monkeypatch.setattr(wrap_cli, "_find_persistent_manifest", lambda port: _Manifest())
     monkeypatch.setattr("headroom.install.health.probe_ready", lambda url: True)
     monkeypatch.setattr(wrap_cli, "_query_proxy_health", lambda port: health)
@@ -258,6 +261,9 @@ def test_ensure_proxy_restarts_idle_stale_ephemeral_proxy(monkeypatch) -> None:
         "config": {"pid": "12345", "memory": False, "learn": False, "code_graph": False},
     }
 
+    # Simulate an installed wheel build (not a source-tree checkout) so that
+    # version-based restart logic is active.
+    monkeypatch.setattr("headroom._version._source_root", lambda: None)
     monkeypatch.setattr(wrap_cli, "_find_persistent_manifest", lambda port: None)
     monkeypatch.setattr(wrap_cli, "_check_proxy", lambda port: len(calls) == 0)
     monkeypatch.setattr(wrap_cli, "_query_proxy_health", lambda port: health)

@@ -171,6 +171,11 @@ class ProxyConfig:
     disable_kompress_anthropic: bool | None = None
     disable_kompress_openai: bool | None = None
 
+    # Japanese → English preprocessing before ML compression.
+    # Opt-in. Requires pip install headroom-ai[translate].
+    # CLI: --enable-japanese-translation; env: HEADROOM_JAPANESE_TRANSLATION=1
+    japanese_translation_enabled: bool = False
+
     # Code graph live watcher (triggers incremental reindex on file changes)
     code_graph_watcher: bool = False
 
